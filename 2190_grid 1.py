@@ -14,29 +14,55 @@ from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from pykrige.ok import OrdinaryKriging
 import matplotlib.ticker as ticker
+from pyproj import Proj, transform
 
 # Parameters
 lmax = 2190
 R = 6378136.3
 GM = 3.986004415E+14
 
-# Define the latitude and longitude ranges with 5 km spacing
-# Approximation: 1 degree latitude ≈ 111 km, 1 degree longitude ≈ 111 km * cos(latitude)
-lat_spacing = 5 / 111  # 5 km in degrees latitude
-lon_spacing = 5 / (111 * np.cos(np.radians(39.5)))  # 5 km in degrees longitude (approx. at the center latitude)
+# Define WGS84 ellipsoid parameters
+wgs84 = Proj(proj="geocent", ellps="WGS84", datum="WGS84")  # Cartesian (X, Y, Z)
+geodetic = Proj(proj="latlong", ellps="WGS84", datum="WGS84")  # Geodetic (lat, lon, h)
 
-lat_range = np.arange(35, 44 + lat_spacing, lat_spacing)  # Latitude range with 5 km spacing
-lon_range = np.arange(-10, 4.5 + lon_spacing, lon_spacing)  # Longitude range with 5 km spacing
+# Load the Cartesian coordinates from the file
+input_file = 'crd.csv'
+cartesian_df = pd.read_csv(input_file, header=None, names=["Station", "Date", "Time", "X", "Y", "Z"])
 
-# Create a meshgrid of latitudes and longitudes
-lats, lons = np.meshgrid(lat_range, lon_range)
+# Extract Cartesian coordinates (X, Y, Z)
+cartesian_df = cartesian_df[["X", "Y", "Z"]]
 
-# Flatten the meshgrid for easier iteration
-flat_lats = lats.flatten()
-flat_lons = lons.flatten()
+# Transform Cartesian to Geodetic coordinates
+latitudes = []
+longitudes = []
+
+for _, row in cartesian_df.iterrows():
+    x, y, z = row["X"], row["Y"], row["Z"]
+    lon, lat, _ = transform(wgs84, geodetic, x, y, z)  # Transform to geodetic (ignore height)
+    latitudes.append(lat)
+    longitudes.append(lon)
+
+# Create a DataFrame with the transformed coordinates
+geodetic_df = pd.DataFrame({
+    "Latitude": latitudes,
+    "Longitude": longitudes
+})
+
+# Filter coordinates within the specified boundaries
+lat_min, lat_max = 35, 44
+lon_min, lon_max = -10, 4.5
+
+filtered_df = geodetic_df[
+    (geodetic_df["Latitude"] >= lat_min) & (geodetic_df["Latitude"] <= lat_max) &
+    (geodetic_df["Longitude"] >= lon_min) & (geodetic_df["Longitude"] <= lon_max)
+]
+
+# Extract filtered latitudes and longitudes
+flat_lats = filtered_df["Latitude"].values
+flat_lons = filtered_df["Longitude"].values
 
 # Extracting static gravity model file coefficients
-gravity_model_file = 'SGG-UGM-2.gfc'
+gravity_model_file = '/home/christian/SGG-UGM-2.gfc'
 Ylms = read_ICGEM_harmonics(gravity_model_file, TIDE='zero_tide', lmax=lmax, ELLIPSOID='WGS84')
 clm = Ylms['clm']
 slm = Ylms['slm']
@@ -61,7 +87,7 @@ def read_topography_harmonics(model_file):
     model_input['slm'][ii, jj] = dinput[(header + n_harm):(header + 2 * n_harm)]
     return model_input
 
-model_file = 'dV_ELL_EARTH2014_5480.bshc'
+model_file = '/home/christian/dV_ELL_EARTH2014_5480.bshc'
 model_input = read_topography_harmonics(model_file)
 tclm = model_input['clm']
 tslm = model_input['slm']
@@ -110,7 +136,7 @@ def corrected_geoid_undulation(lat, lon, refell, clm, slm, tclm, tslm, lmax, R, 
 def compute_geoid_parallel(flat_lats, flat_lons, refell, clm, slm, tclm, tslm, lmax, R, GM, density):
     # Use partial to pre-fill the additional arguments
     partial_function = partial(corrected_geoid_undulation, refell=refell, clm=clm, slm=slm, tclm=tclm, tslm=tslm, lmax=lmax, R=R, GM=GM, density=density)
-    with ProcessPoolExecutor(max_workers=20) as executor:  # Limit to 4 workers to reduce memory usage
+    with ProcessPoolExecutor(max_workers=4) as executor:  # Limit to 4 workers to reduce memory usage
         results = list(tqdm(executor.map(partial_function, flat_lats, flat_lons), total=len(flat_lats), desc="Processing points in parallel"))
     return np.array(results)
 
@@ -119,7 +145,7 @@ print("Computing geoid undulation heights in parallel...")
 geoid_heights = compute_geoid_parallel(flat_lats, flat_lons, 'WGS84', clm, slm, tclm, tslm, lmax, R, GM, density)
 
 # Save the results to a CSV file
-output_file = 'geoid_undulation_spain.csv'
+output_file = '/home/christian/ign_project/geoid_undulation_spain.csv'
 results_df = pd.DataFrame({
     'Latitude': flat_lats,
     'Longitude': flat_lons,
@@ -129,7 +155,7 @@ results_df.to_csv(output_file, index=False)
 print(f"Results saved to {output_file}")
 
 # Load the geoid undulation data from the CSV file
-csv_file = 'geoid_undulation_spain.csv'
+csv_file = '/home/christian/ign_project/geoid_undulation_spain.csv'
 results_df = pd.read_csv(csv_file)
 
 # Extract the latitude, longitude, and geoid height data
@@ -194,7 +220,7 @@ ax.text(
 )
 
 # Save the plot
-plot_file = 'geoid_undulation_map.png'
+plot_file = '/home/christian/ign_project/geoid_undulation_map.png'
 plt.savefig(plot_file)
 print(f"Map saved to {plot_file}")
 
